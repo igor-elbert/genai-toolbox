@@ -22,6 +22,7 @@ import (
 	"github.com/googleapis/genai-toolbox/internal/sources"
 	"github.com/googleapis/genai-toolbox/internal/sources/snowflake"
 	"github.com/googleapis/genai-toolbox/internal/tools"
+	snowflaketool "github.com/googleapis/genai-toolbox/internal/tools/snowflake"
 	"github.com/jmoiron/sqlx"
 )
 
@@ -121,41 +122,7 @@ func (t Tool) Invoke(ctx context.Context, params tools.ParamValues) ([]any, erro
 		return nil, fmt.Errorf("unable to get cast %s", sliceParams[0])
 	}
 
-	rows, err := t.DB.QueryxContext(ctx, sql)
-	if err != nil {
-		return nil, fmt.Errorf("unable to execute query: %w", err)
-	}
-	defer rows.Close()
-
-	var out []any
-	for rows.Next() {
-		cols, err := rows.Columns()
-		if err != nil {
-			return nil, fmt.Errorf("unable to get columns: %w", err)
-		}
-
-		values := make([]interface{}, len(cols))
-		valuePtrs := make([]interface{}, len(cols))
-		for i := range values {
-			valuePtrs[i] = &values[i]
-		}
-
-		if err := rows.Scan(valuePtrs...); err != nil {
-			return nil, fmt.Errorf("unable to scan row: %w", err)
-		}
-
-		vMap := make(map[string]any)
-		for i, col := range cols {
-			vMap[col] = values[i]
-		}
-		out = append(out, vMap)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("row iteration error: %w", err)
-	}
-
-	return out, nil
+	return snowflaketool.ExecuteQuery(ctx, t.DB, sql)
 }
 
 func (t Tool) ParseParams(data map[string]any, claims map[string]map[string]any) (tools.ParamValues, error) {

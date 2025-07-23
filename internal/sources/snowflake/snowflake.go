@@ -17,18 +17,19 @@ package snowflake
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/goccy/go-yaml"
 	"github.com/googleapis/genai-toolbox/internal/sources"
 	"github.com/jmoiron/sqlx"
-	_ "github.com/snowflakedb/gosnowflake"
+	"github.com/snowflakedb/gosnowflake"
 	"go.opentelemetry.io/otel/trace"
 )
 
 const SourceKind string = "snowflake"
 
 // validate interface
-var _ sources.SourceConfig = Config{}
+var _ sources.SourceConfig = &Config{}
 
 func init() {
 	if !sources.Register(SourceKind, newConfig) {
@@ -37,8 +38,8 @@ func init() {
 }
 
 func newConfig(ctx context.Context, name string, decoder *yaml.Decoder) (sources.SourceConfig, error) {
-	actual := Config{Name: name}
-	if err := decoder.DecodeContext(ctx, &actual); err != nil {
+	actual := &Config{Name: name}
+	if err := decoder.DecodeContext(ctx, actual); err != nil {
 		return nil, err
 	}
 	return actual, nil
@@ -56,12 +57,12 @@ type Config struct {
 	Role      string `yaml:"role"`
 }
 
-func (r Config) SourceConfigKind() string {
+func (r *Config) SourceConfigKind() string {
 	return SourceKind
 }
 
-func (r Config) Initialize(ctx context.Context, tracer trace.Tracer) (sources.Source, error) {
-	db, err := initSnowflakeConnection(ctx, tracer, r.Name, r.Account, r.User, r.Password, r.Database, r.Schema, r.Warehouse, r.Role)
+func (r *Config) Initialize(ctx context.Context, tracer trace.Tracer) (sources.Source, error) {
+	db, err := initSnowflakeConnection(ctx, tracer, r)
 	if err != nil {
 		return nil, fmt.Errorf("unable to create connection: %w", err)
 	}
@@ -72,7 +73,6 @@ func (r Config) Initialize(ctx context.Context, tracer trace.Tracer) (sources.So
 	}
 
 	s := &Source{
-		Name: r.Name,
 		Kind: SourceKind,
 		DB:   db,
 	}
@@ -95,26 +95,45 @@ func (s *Source) SnowflakeDB() *sqlx.DB {
 	return s.DB
 }
 
-func initSnowflakeConnection(ctx context.Context, tracer trace.Tracer, name, account, user, password, database, schema, warehouse, role string) (*sqlx.DB, error) {
-	//nolint:all // Reassigned ctx
-	ctx, span := sources.InitConnectionSpan(ctx, tracer, SourceKind, name)
+func initSnowflakeConnection(ctx context.Context, tracer trace.Tracer, cfg *Config) (*sqlx.DB, error) {
+	_, span := sources.InitConnectionSpan(ctx, tracer, SourceKind, cfg.Name)
 	defer span.End()
 
 	// Set defaults for optional parameters
-	if warehouse == "" {
-		warehouse = "COMPUTE_WH"
+	if cfg.Warehouse == "" {
+		cfg.Warehouse = "COMPUTE_WH"
 	}
-	if role == "" {
-		role = "ACCOUNTADMIN"
+	if cfg.Role == "" {
+		cfg.Role = "ACCOUNTADMIN"
 	}
 
-	// Snowflake DSN format: user:password@account/database/schema?warehouse=warehouse&role=role
-	dsn := fmt.Sprintf("%s:%s@%s/%s/%s?warehouse=%s&role=%s&protocol=https&timeout=60", user, password, account, database, schema, warehouse, role)
+	// Use gosnowflake.Config for a more robust DSN construction
+	dsnCfg := &gosnowflake.Config{
+		Account:   cfg.Account,
+		User:      cfg.User,
+		Password:  cfg.Password,
+		Database:  cfg.Database,
+		Schema:    cfg.Schema,
+		Warehouse: cfg.Warehouse,
+		Role:      cfg.Role,
+		Params: map[string]*string{
+			"protocol": stringPtr("https"),
+			"timeout":  stringPtr(fmt.Sprintf("%d", 60*time.Second)),
+		},
+	}
+
+	dsn, err := gosnowflake.DSN(dsnCfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to format Snowflake DSN: %w", err)
+	}
 	db, err := sqlx.Connect("snowflake", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("unable to create connection: %w", err)
+		return nil, fmt.Errorf("failed to create Snowflake connection: %w", err)
 	}
 
 	return db, nil
 }
 
+func stringPtr(s string) *string {
+	return &s
+}
